@@ -1,0 +1,4 @@
+fastapi
+slack-sdk
+python-dotenv
+slack_bolt
