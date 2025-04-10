@@ -1,4 +1,5 @@
-fastapi
 slack-sdk
 python-dotenv
-slack_bolt
+slack-bolt[async]
+google-genai
+aiohttp
