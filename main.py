@@ -54,6 +54,86 @@ async def handle_sarcasm_command(ack, event, say, client):
     await say(text=ai_response.text, thread_ts=thread_ts or event["ts"])
 
 
+import asyncio
+from collections import defaultdict
+
+MAX_CONCURRENT_REQUESTS = 10  # Tune this to avoid rate limits
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+async def fetch_replies(client, channel_id, ts):
+    async with semaphore:
+        try:
+            replies = await client.conversations_replies(channel=channel_id, ts=ts)
+            return replies.get("messages", [])
+        except Exception as e:
+            return []
+
+async def fetch_user_info(client, user_id):
+    async with semaphore:
+        try:
+            user_info = await client.users_info(user=user_id)
+            return user_id, user_info["user"]["real_name"]
+        except:
+            return user_id, user_id
+
+@app.command("/stat")
+async def handle_channel_stats_command(ack, respond, command, client, logger):
+    await ack()
+    channel_id = command["channel_id"]
+    await respond("Fetching stats for this channel... ⏳")
+    logger.info(f"Fetching stats for channel: {channel_id}")
+
+    user_message_count = defaultdict(int)
+    msg_cursor = None
+    all_messages = []
+
+    while True:
+        try:
+            history = await client.conversations_history(channel=channel_id, limit=200, cursor=msg_cursor)
+        except Exception as e:
+            logger.error(f"Error fetching history: {e}")
+            await respond(f"Failed to fetch messages: {e}")
+            return
+
+        messages = history.get("messages", [])
+        if not messages:
+            break
+
+        all_messages.extend(messages)
+        msg_cursor = history.get("response_metadata", {}).get("next_cursor")
+        if not msg_cursor:
+            break
+        await asyncio.sleep(1) # rate limit cuz i was hitting errors with slack api. i also reduced limit to 100 for this reason
+
+    thread_tasks = []
+    for msg in all_messages:
+        if "user" in msg:
+            user_message_count[msg["user"]] += 1
+        if msg.get("thread_ts") and msg.get("reply_count", 0) > 0:
+            thread_tasks.append(fetch_replies(client, channel_id, msg["ts"]))
+
+    all_replies = await asyncio.gather(*thread_tasks)
+    for replies in all_replies:
+        for reply in replies:
+            if "user" in reply:
+                user_message_count[reply["user"]] += 1
+
+    unique_user_ids = list(user_message_count.keys())
+    user_info_tasks = [fetch_user_info(client, uid) for uid in unique_user_ids]
+    user_names = dict(await asyncio.gather(*user_info_tasks))
+
+    user_stats = [{"User ID": uid, "Name": user_names[uid], "Messages": count}
+                  for uid, count in user_message_count.items()]
+    user_stats.sort(key=lambda x: x["Messages"], reverse=True)
+    top_contributors = user_stats[:10]
+
+    leaderboard = "*🏆 Top Contributors in This Channel:*\n"
+    for u in top_contributors:
+        leaderboard += f"> *{u['Name']}*: {u['Messages']} messages\n"
+
+    await respond(leaderboard)
+
+
 @app.command("/stat")
 async def handle_channel_stats_command(ack, respond, command, client, logger):
     await ack()
