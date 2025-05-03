@@ -37,6 +37,9 @@ async def handle_sarcasm_command(ack, event, say, client):
     channel_id = event["channel"]
     user_message = event["text"]
 
+    manual = gemini_client.files.upload(file="PA4.pdf")
+    starter_code = gemini_client.files.upload(file="DHT.py")
+
     if thread_ts:
         response = await client.conversations_replies(channel=channel_id, ts=thread_ts)
         messages = response.get("messages", [])
@@ -47,8 +50,8 @@ async def handle_sarcasm_command(ack, event, say, client):
 
     ai_response = gemini_client.models.generate_content(
         model="gemini-2.0-flash",
-        contents=f"""Generate a short, extremely sarcastic and funny response to this user. To give you context, you are part of a slack workspace for the course Network Centric Computing CS 382. The students will either have questions about the course or assignemnts. We will only ask you to generate sarcastic responses to the students who it seems like have either not read the assignment manual, watched the assignment tutorial, not been attending class lectures or consulting course material like the course LMS tab to view the relevant deadlines and materials. Here is an example for you as well. User: Are we supposed to to implement the assignment in C++ or Java?
-        You: Tsk tsk. Someone did not bother reading the manual. I guess you are not a fan of reading, huh? \n Here is the user message that you need to respond to:Generate a short, sarcastic and funny response based on the following conversation:\n{thread_context}"""
+        contents=[f"""Generate a short, extremely sarcastic, relevant and funny response to this user. To give you context, you are part of a slack workspace for the course Network Centric Computing CS 382. The students will either have questions about the course or assignemnts. We will only ask you to generate sarcastic responses to the students who it seems like have either not read the assignment manual, watched the assignment tutorial, not been attending class lectures or consulting course material like the course LMS tab to view the relevant deadlines and materials. I have attached the assignment manual and starter code for your reference as well. Here is an example for you as well. User: Are we supposed to to implement the assignment in C++ or Java?
+        You: Tsk tsk. Someone did not bother reading the manual. I guess you are not a fan of reading, huh? \n Here is the user message that you need to respond to:Generate a short, sarcastic, relevant and funny response based on the following conversation:\n{thread_context}""", manual, starter_code],
     )
 
     await say(text=ai_response.text, thread_ts=thread_ts or event["ts"])
