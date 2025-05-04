@@ -3,3 +3,5 @@ python-dotenv
 slack-bolt[async]
 google-genai
 aiohttp
+tenacity
+ratelimit

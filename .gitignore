@@ -1,2 +1,7 @@
 slackbot/
 .env
+assignment_material/
+.venv/
+.python*
+uv.lock
+__pycache__/
