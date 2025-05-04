@@ -87,7 +87,7 @@ async def handle_help_command(ack, say, command):
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=4, min=60, max=200))
 @sleep_and_retry
-@limits(calls=10, period=30)
+@limits(calls=5, period=60)
 @app.command("/stat")
 async def handle_channel_stats_command(ack, respond, command, client):
     await ack()

@@ -6,9 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.11.18",
+    "black>=25.1.0",
     "google-genai>=1.13.0",
     "python-dotenv>=1.1.0",
     "ratelimit>=2.2.1",
+    "ruff>=0.11.8",
     "slack-bolt[async]>=1.23.0",
     "slack-sdk>=3.35.0",
     "tenacity>=9.1.2",
