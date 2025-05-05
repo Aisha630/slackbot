@@ -10,6 +10,8 @@ from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 from google import genai
 from ratelimit import limits, sleep_and_retry
 from tenacity import retry, stop_after_attempt, wait_exponential
+import requests
+from google.genai import types
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,30 @@ async def fetch_user_info(client, user_id: str) -> Tuple[str, str]:
         except Exception:
             return user_id, user_id
 
+
+@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=4, min=60, max=200))
+def get_images(messages):
+    headers = {"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"}
+    image_parts = []
+
+    for msg in messages:
+        for file in msg.get("files", []):
+            url = file.get("url_private")
+            if file.get("mimetype", "").startswith("image/") and url:
+                try:
+                    resp = requests.get(url, headers=headers)
+                    resp.raise_for_status()
+                    content_type = resp.headers.get("Content-Type", "")
+                    if content_type.startswith("image/"):
+                        part = types.Part.from_bytes(data=resp.content, mime_type=content_type)
+                        image_parts.append(part)
+                        print(f"Downloaded image from {url}")
+                    else:
+                        print(f"Skipped non-image content: {content_type} from {url}")
+                except requests.RequestException as e:
+                    print(f"Error downloading image from {url} — {e}")
+
+    return image_parts
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=3, min=30, max=100))
 @app.command("/anon")
@@ -73,7 +99,7 @@ async def handle_sarcasm_command(ack, say, command):
 @sleep_and_retry
 @limits(calls=5, period=60)
 @app.command("/help")
-async def handle_help_command(ack, say, command):
+async def handle_help_command(ack, respond, say, command):
     await ack()
     user_message = command["text"]
     prompt = build_help_prompt(user_message, gemini_client)
@@ -143,19 +169,21 @@ async def handle_app_mentions(ack, event, say, client):
     channel_id = event["channel"]
     thread_ts = event.get("thread_ts", event["ts"])
 
-    if thread_ts:
-        response = await client.conversations_replies(channel=channel_id, ts=thread_ts)
-        messages = response.get("messages", [])
-        thread_context = "\n".join([msg["text"] for msg in messages])
-    else:
-        thread_context = user_message
+    response = await client.conversations_replies(channel=channel_id, ts=thread_ts)
+    messages = response.get("messages", [])
+    thread_context = user_message + \
+        "\n".join([msg["text"] for msg in messages]
+                  ) if messages else user_message
+
+    image_parts = get_images([event]) + get_images(messages)
 
     if "sarcasm" in user_message.lower():
-        prompt = build_sarcasm_prompt(thread_context, gemini_client)
+        prompt = build_sarcasm_prompt(thread_context, gemini_client) + image_parts
         ai_response = gemini_client.models.generate_content(
-            model=MODEL_SARCASM, contents=prompt)
+            model=MODEL_SARCASM, contents=prompt,
+        )
     else:
-        prompt = build_help_prompt(thread_context, gemini_client)
+        prompt = build_help_prompt(thread_context, gemini_client) + image_parts
         ai_response = gemini_client.models.generate_content(
             model=MODEL_HELPFUL, contents=prompt)
 
