@@ -50,20 +50,19 @@ def get_images(messages):
         for file in msg.get("files", []):
             url = file.get("url_private")
             if file.get("mimetype", "").startswith("image/") and url:
-                try:
-                    resp = requests.get(url, headers=headers)
-                    resp.raise_for_status()
-                    content_type = resp.headers.get("Content-Type", "")
-                    if content_type.startswith("image/"):
-                        part = types.Part.from_bytes(data=resp.content, mime_type=content_type)
-                        image_parts.append(part)
-                        print(f"Downloaded image from {url}")
-                    else:
-                        print(f"Skipped non-image content: {content_type} from {url}")
-                except requests.RequestException as e:
-                    print(f"Error downloading image from {url} — {e}")
-
+                resp = requests.get(url, headers=headers)
+                resp.raise_for_status()
+                content_type = resp.headers.get("Content-Type", "")
+                if content_type.startswith("image/"):
+                    part = types.Part.from_bytes(
+                        data=resp.content, mime_type=content_type)
+                    image_parts.append(part)
+                    logger.info(f"Downloaded image from {url}")
+                else:
+                    logger.warning(
+                        f"Skipped non-image content: {content_type} from {url}")
     return image_parts
+
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=3, min=30, max=100))
 @app.command("/anon")
@@ -178,7 +177,8 @@ async def handle_app_mentions(ack, event, say, client):
     image_parts = get_images([event]) + get_images(messages)
 
     if "sarcasm" in user_message.lower():
-        prompt = build_sarcasm_prompt(thread_context, gemini_client) + image_parts
+        prompt = build_sarcasm_prompt(
+            thread_context, gemini_client) + image_parts
         ai_response = gemini_client.models.generate_content(
             model=MODEL_SARCASM, contents=prompt,
         )
