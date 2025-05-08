@@ -12,14 +12,22 @@ from ratelimit import limits, sleep_and_retry
 from tenacity import retry, stop_after_attempt, wait_exponential
 import requests
 from google.genai import types
+import random
+import aiohttp
+import json
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+api_keys = os.environ.get("GEMINI_API_KEY").split(",")
 
 app = AsyncApp(token=os.environ.get("SLACK_BOT_TOKEN"))
+
+
+def get_random_gemini_client():
+    key = random.choice(api_keys)
+    return genai.Client(api_key=key)
 
 
 async def fetch_replies(client, channel_id: str, ts: str):
@@ -64,18 +72,134 @@ def get_images(messages):
     return image_parts
 
 
-@retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=3, min=30, max=100))
+async def open_anonymous_post_modal(client, trigger_id, user_id, initial_text, channel_id):
+    try:
+        await client.views_open(
+            trigger_id=trigger_id,
+            view={
+                "type": "modal",
+                "callback_id": "anonymous_post_modal_with_files",
+                "title": {"type": "plain_text", "text": "Create Anonymous Post"},
+                "submit": {"type": "plain_text", "text": "Post Anonymously"},
+                "close": {"type": "plain_text", "text": "Cancel"},
+                "blocks": [
+                    {
+                        "type": "input",
+                        "block_id": "message_block",
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "message_input",
+                            "multiline": True,
+                            "initial_value": initial_text,
+                            "placeholder": {"type": "plain_text", "text": "Your anonymous message..."}
+                        },
+                        "label": {"type": "plain_text", "text": "Message"}
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "file_upload_block",
+                        "label": {"type": "plain_text", "text": "Upload Files (Images, PDFs, or MP4s)"},
+                        "element": {
+                            "type": "file_input",
+                            "action_id": "file_upload_action",
+                            "max_files": 10,
+                            "filetypes": ["jpg", "jpeg", "png", "gif", "pdf", "mp4"]
+                        },
+                        "optional": True
+                    }
+                ],
+                "private_metadata": json.dumps({"user_id": user_id, "channel_id": channel_id})
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error opening modal for /anon: {e}")
+
+
 @app.command("/anon")
-async def handle_anonymous_command(ack, say, command, client):
+async def handle_anonymous_command(ack, command, client):
     await ack()
     user_id = command["user_id"]
-    user_message = command["text"]
+    initial_text = command.get("text", "")
+    trigger_id = command["trigger_id"]
+    channel_id = command["channel_id"]
 
-    await say(user_message)
-    await client.chat_postMessage(
-        channel=ADMIN_CHANNEL,
-        text=f"Anonymous message sent by <@{user_id}>:\n{user_message}"
-    )
+    await open_anonymous_post_modal(client, trigger_id, user_id, initial_text, channel_id)
+
+
+@app.view("anonymous_post_modal_with_files")
+async def handle_anonymous_post_modal_submission(ack, body, client, view):
+    await ack()
+
+    metadata = json.loads(view["private_metadata"])
+    original_user_id = metadata.get("user_id")
+    original_channel_id = metadata.get("channel_id")
+
+    values = view["state"]["values"]
+    user_message = values.get("message_block", {}).get(
+        "message_input", {}).get("value", "")
+    uploaded_files_info = values.get("file_upload_block", {}).get(
+        "file_upload_action", {}).get("files", [])
+
+    if not user_message and not uploaded_files_info:
+        logger.info("Attempted to submit an empty message")
+        return
+
+    processed_file_blocks = []
+
+    for file_info in uploaded_files_info:
+        download_url = file_info["url_private"]
+        headers = {"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"}
+        try:
+            response = requests.get(download_url, headers=headers)
+
+            if response.status_code == 200:
+                file_bytes = response.content
+
+                upload_response = await client.files_upload_v2(
+                    channel=original_channel_id,
+                    file=file_bytes,
+                    filename=file_info.get("name"),
+                    title="Anonymous file"
+                )
+                if upload_response.get("ok"):
+                    new_file_data = upload_response.get("files", [])[0]
+                    file_display_url = new_file_data.get('url_private')
+
+                    if file_info.get("mimetype", "").startswith("image/") and file_display_url:
+                        processed_file_blocks.append({
+                            "type": "image",
+                            "image_url": file_display_url,
+                            "alt_text": "Anonymous image"
+                        })
+                else:
+                    logger.error(
+                        f"Failed to upload file: {upload_response.get('error', 'Unknown error')}")
+            else:
+                logger.error(
+                    f"Failed to download file from <@{original_user_id}>: Status {response.status_code}")
+        except Exception as e:
+            logger.error(f"Error processing file upload: {e}")
+
+    final_blocks = processed_file_blocks.copy()
+    if user_message:
+        final_blocks.append({"type": "section", "text": {
+                            "type": "mrkdwn", "text": user_message}})
+
+    if final_blocks:
+        try:
+            await client.chat_postMessage(
+                channel=original_channel_id,
+                blocks=final_blocks,
+                text="Anonymous message"
+            )
+            admin_msg = f"Anonymous post by <@{original_user_id}> in <#{original_channel_id}>: {user_message}."
+            await client.chat_postMessage(channel=ADMIN_CHANNEL, text=admin_msg)
+        except Exception as e:
+            logger.error("Failed to post anonymous message", e)
+            await client.chat_postMessage(
+                channel=original_user_id,
+                text="Error posting your anonymous message."
+            )
 
 
 @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=4, min=60, max=200))
@@ -85,6 +209,7 @@ async def handle_anonymous_command(ack, say, command, client):
 async def handle_sarcasm_command(ack, say, command):
     await ack()
     user_message = command["text"]
+    gemini_client = get_random_gemini_client()
     prompt = build_sarcasm_prompt(user_message, gemini_client)
     await say("Generating a sarcastic response... ⏳")
     ai_response = gemini_client.models.generate_content(
@@ -101,6 +226,7 @@ async def handle_sarcasm_command(ack, say, command):
 async def handle_help_command(ack, respond, say, command):
     await ack()
     user_message = command["text"]
+    gemini_client = get_random_gemini_client()
     prompt = build_help_prompt(user_message, gemini_client)
     await respond("Fetching help... ⏳")
     ai_response = gemini_client.models.generate_content(
@@ -175,6 +301,8 @@ async def handle_app_mentions(ack, event, say, client):
                   ) if messages else user_message
 
     image_parts = get_images([event]) + get_images(messages)
+
+    gemini_client = get_random_gemini_client()
 
     if "sarcasm" in user_message.lower():
         prompt = build_sarcasm_prompt(
