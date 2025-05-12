@@ -13,7 +13,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 import requests
 from google.genai import types
 import random
-import aiohttp
 import json
 
 load_dotenv()
@@ -74,6 +73,28 @@ def get_images(messages):
 
 async def open_anonymous_post_modal(client, trigger_id, user_id, initial_text, channel_id):
     try:
+        rich_text_input_element = {
+            "type": "rich_text_input",
+            "action_id": "message_input",
+            "placeholder": {"type": "plain_text", "text": "Your anonymous message..."}
+        }
+
+        if initial_text:
+            rich_text_input_element["initial_value"] = {
+                "type": "rich_text",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {
+                                "type": "text",
+                                "text": initial_text,
+                            }
+                        ]
+                    }
+                ]
+            }
+
         await client.views_open(
             trigger_id=trigger_id,
             view={
@@ -86,13 +107,7 @@ async def open_anonymous_post_modal(client, trigger_id, user_id, initial_text, c
                     {
                         "type": "input",
                         "block_id": "message_block",
-                        "element": {
-                            "type": "plain_text_input",
-                            "action_id": "message_input",
-                            "multiline": True,
-                            "initial_value": initial_text,
-                            "placeholder": {"type": "plain_text", "text": "Your anonymous message..."}
-                        },
+                        "element": rich_text_input_element,
                         "label": {"type": "plain_text", "text": "Message"}
                     },
                     {
@@ -135,10 +150,20 @@ async def handle_anonymous_post_modal_submission(ack, body, client, view):
     original_channel_id = metadata.get("channel_id")
 
     values = view["state"]["values"]
-    user_message = values.get("message_block", {}).get(
-        "message_input", {}).get("value", "")
-    uploaded_files_info = values.get("file_upload_block", {}).get(
-        "file_upload_action", {}).get("files", [])
+    rich_text_value = values.get("message_block", {}).get("message_input", {}).get("rich_text_value", {})
+
+    user_message = ""
+
+    if rich_text_value and "elements" in rich_text_value:
+        for element in rich_text_value["elements"]:
+            if element["type"] == "rich_text_section":
+                for sub_element in element["elements"]:
+                    if sub_element["type"] == "text":
+                        user_message += sub_element["text"]
+                    elif sub_element["type"] == "user":
+                        user_message += f"<@{sub_element['user_id']}>"
+
+    uploaded_files_info = values.get("file_upload_block", {}).get("file_upload_action", {}).get("files", [])
 
     if not user_message and not uploaded_files_info:
         logger.info("Attempted to submit an empty message")
@@ -296,9 +321,30 @@ async def handle_app_mentions(ack, event, say, client):
 
     response = await client.conversations_replies(channel=channel_id, ts=thread_ts)
     messages = response.get("messages", [])
-    thread_context = user_message + \
-        "\n".join([msg["text"] for msg in messages]
-                  ) if messages else user_message
+    
+    def extract_text_from_blocks(blocks):
+        text = []
+        for block in blocks:
+            if block["type"] == "section" and "text" in block:
+                text.append(block["text"]["text"])
+            elif block["type"] == "rich_text" and "elements" in block:
+                for element in block["elements"]:
+                    if element["type"] == "rich_text_section":
+                        for sub_element in element["elements"]:
+                            if sub_element["type"] == "text":
+                                text.append(sub_element["text"])
+        return " ".join(text)
+
+    replies = []
+    for msg in messages:
+        reply_text = msg.get("text", "")
+        if "blocks" in msg:
+            reply_text = extract_text_from_blocks(msg["blocks"])
+        replies.append(reply_text)
+
+    thread_context = f"\n".join(replies)
+
+    logger.warning(f"Full thread context: {thread_context}")
 
     image_parts = get_images([event]) + get_images(messages)
 
